@@ -3291,6 +3291,312 @@ def sensitivity_analysis(
 # MAIN
 # =============================================================================
 
+def _get_model_type_from_name(model_name: str) -> str:
+    """Преобразует имя модели в формат, понятный дочерним функциям.
+
+    🔧 РЕФАКТОРИНГ: раньше это была вложенная функция внутри run_ml_pipeline()
+    (недоступная снаружи и создававшаяся заново при каждом вызове). Вынесена
+    на уровень модуля как приватный (_) хелпер — логика не изменилась ни на
+    строку, изменилась только область видимости.
+
+    Поддерживает варианты:
+    - 'HistGradientBoosting', 'HistGB', 'hist' → 'HistGB'
+    - 'RandomForest', 'RF', 'RandomForest + Optuna (Exp4)' → 'RandomForest'
+    - 'XGBoost', 'XGB', 'XGBoost + Optuna (Exp1)' → 'XGBoost'
+    - Fallback → 'RandomForest'
+    """
+    name_lower = model_name.lower().replace(' ', '').replace('_', '')
+
+    if 'histgradient' in name_lower or 'histgb' in name_lower or name_lower == 'hist':
+        return 'HistGB'
+    elif 'randomforest' in name_lower or name_lower == 'rf':
+        return 'RandomForest'
+    elif 'xgboost' in name_lower or name_lower == 'xgb':
+        return 'XGBoost'
+    else:
+        print(f"\n⚠️ Не удалось определить тип модели из '{model_name}', используем RandomForest")
+        return 'RandomForest'
+
+
+def _prepare_and_compare_baseline(
+        df_unique: pd.DataFrame,
+        eda_results: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Шаги 1-3 run_ml_pipeline(): подготовка данных, сравнение 8 базовых
+    моделей, проверка на утечку данных (category_price_level).
+
+    🔧 РЕФАКТОРИНГ (разбиение run_ml_pipeline на приватные функции, куратор):
+    чистое извлечение метода (extract method) — логика и порядок операций
+    не изменились, изменилась только организация кода. Все промежуточные
+    величины возвращаются одним словарём (не dataclass — это внутренняя,
+    не публичная передача данных между шагами одного пайплайна, здесь
+    typo-риск не так критичен, как в MLPipelineResult, который расходится
+    по всему проекту).
+    """
+    print("\n" + "=" * 70)
+    print("ПОДГОТОВКА ДАННЫХ ДЛЯ ML")
+    print("=" * 70)
+
+    sellable_verdict = eda_results['sellable_verdict']
+    old_price_check = eda_results['old_price_check']
+
+    X_train, X_test, y_train, y_test, X, y, num_feat, cat_feat, bin_feat, bool_feat = prepare_ml_data(
+        df_unique,
+        sellable_verdict=sellable_verdict,
+        old_price_verdict=old_price_check['verdict'],
+        old_price_features_to_use=old_price_check['features_to_use']
+    )
+
+    results_df, best_name, best_pipeline, preprocessor = compare_models(
+        X_train, X_test, y_train, y_test, num_feat, cat_feat, bin_feat, bool_feat
+    )
+
+    print(f"\n{'=' * 70}")
+    print(" ФИНАЛЬНАЯ МОДЕЛЬ (после сравнения)")
+    print(f"{'=' * 70}")
+    print(f"\n Лучшая модель: {best_name}")
+    print(f"   R² (тест): {results_df.iloc[0]['R2']:.4f}")
+    print(f"   MAE: {results_df.iloc[0]['MAE']:.2f}")
+
+    simple_r2 = results_df.iloc[0]['R2']
+    simple_mae = results_df.iloc[0]['MAE']
+
+    r2_with, r2_without, r2_diff, verdict = check_data_leakage(
+        X_train, X_test, y_train, y_test,
+        num_feat, cat_feat, bin_feat, bool_feat
+    )
+
+    if verdict == "LEAKAGE":
+        print("\n⚠️ Удаляем признак category_price_level из-за утечки!")
+        X_train = X_train.drop(columns=['category_price_level'])
+        X_test = X_test.drop(columns=['category_price_level'])
+        X = X.drop(columns=['category_price_level'])
+        num_feat = [f for f in num_feat if f != 'category_price_level']
+    else:
+        print(f"\n Оставляем признак category_price_level (verdict: {verdict})")
+
+    return {
+        'X_train': X_train, 'X_test': X_test, 'y_train': y_train, 'y_test': y_test,
+        'X': X, 'y': y, 'num_feat': num_feat, 'cat_feat': cat_feat,
+        'bin_feat': bin_feat, 'bool_feat': bool_feat, 'preprocessor': preprocessor,
+        'best_name': best_name, 'best_pipeline': best_pipeline,
+        'simple_r2': simple_r2, 'simple_mae': simple_mae, 'verdict': verdict,
+    }
+
+
+def _run_hyperparameter_search(
+        X_train: pd.DataFrame, X_test: pd.DataFrame,
+        y_train: pd.Series, y_test: pd.Series,
+        preprocessor: ColumnTransformer,
+        rerun_optuna: bool, trials: Optional[int], cv: Optional[int]
+) -> Dict[str, Any]:
+    """Шаги 4-5 run_ml_pipeline(): Optuna + GridSearchCV.
+
+    🔧 РЕФАКТОРИНГ: чистое извлечение метода, логика не изменилась.
+    """
+    print("\n" + "=" * 70)
+    print("OPTUNA: БАЙЕСОВСКАЯ ОПТИМИЗАЦИЯ ГИПЕРПАРАМЕТРОВ")
+    print("=" * 70)
+
+    optuna_pipeline, optuna_model_name, study_exp1, study_exp2, optuna_comparison, optuna_params = optimize_with_optuna_experiments(
+        X_train, X_test, y_train, y_test, preprocessor,
+        rerun=rerun_optuna,
+        n_trials_1=trials or 50,
+        n_trials_2=trials or 75,
+        n_trials_3=trials or 75,
+        cv_folds=cv or 5
+    )
+
+    y_pred_optuna_log = optuna_pipeline.predict(X_test)
+    y_pred_optuna = np.expm1(y_pred_optuna_log)
+    optuna_r2 = r2_score(y_test, y_pred_optuna)
+    optuna_mae = mean_absolute_error(y_test, y_pred_optuna)
+
+    print(f"\n📊 Метрики Optuna на тесте:")
+    print(f"   Модель: {optuna_model_name}")
+    print(f"   R² (тест): {optuna_r2:.4f}")
+    print(f"   MAE (тест): {optuna_mae:.2f} SR")
+
+    print(f"\n{'=' * 70}")
+    print("GRIDSEARCHCV ДЛЯ ЛУЧШЕЙ МОДЕЛИ ")
+    print(f"{'=' * 70}")
+
+    gridsearch_results = gridsearch_best_model(
+        X_train, X_test, y_train, y_test, preprocessor
+    )
+
+    gs_pipeline = gridsearch_results['best_model']
+    gs_r2 = gridsearch_results['test_r2']
+    gs_mae = gridsearch_results['test_mae']
+    gs_params = gridsearch_results['best_params']
+
+    print(f"\n📊 Метрики GridSearchCV на тесте:")
+    print(f"   R² (тест): {gs_r2:.4f}")
+    print(f"   MAE (тест): {gs_mae:.2f} SR")
+
+    return {
+        'optuna_pipeline': optuna_pipeline, 'optuna_model_name': optuna_model_name,
+        'optuna_r2': optuna_r2, 'optuna_mae': optuna_mae, 'optuna_params': optuna_params,
+        'gridsearch_results': gridsearch_results, 'gs_pipeline': gs_pipeline,
+        'gs_r2': gs_r2, 'gs_mae': gs_mae, 'gs_params': gs_params,
+    }
+
+
+def _select_best_model(
+        baseline: Dict[str, Any],
+        hp_search: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Шаг 6 run_ml_pipeline(): сравнение простой модели / Optuna / GridSearchCV,
+    выбор победителя (принцип Occam's Razor), сборка model_selection_details.
+
+    🔧 РЕФАКТОРИНГ: имя функции — прямая рекомендация куратора
+    ("_select_best_model()"). Логика не изменилась.
+    """
+    print(f"\n{'=' * 70}")
+    print(" СРАВНЕНИЕ ВСЕХ МОДЕЛЕЙ")
+    print(f"{'=' * 70}")
+
+    candidates = {
+        'simple': {'r2': baseline['simple_r2'], 'mae': baseline['simple_mae'],
+                   'name': baseline['best_name'], 'pipeline': baseline['best_pipeline'], 'params': None},
+        'optuna': {'r2': hp_search['optuna_r2'], 'mae': hp_search['optuna_mae'],
+                   'name': hp_search['optuna_model_name'], 'pipeline': hp_search['optuna_pipeline'],
+                   'params': hp_search['optuna_params']},
+        'gridsearch': {'r2': hp_search['gs_r2'], 'mae': hp_search['gs_mae'],
+                       'name': 'RandomForest + GridSearchCV', 'pipeline': hp_search['gs_pipeline'],
+                       'params': hp_search['gs_params']}
+    }
+
+    best_candidate = max(candidates.items(), key=lambda x: x[1]['r2'])
+    winner = best_candidate[0]
+    winner_data = best_candidate[1]
+
+    final_pipeline = winner_data['pipeline']
+    final_model_name = winner_data['name']
+    final_params = winner_data['params']
+    final_r2 = winner_data['r2']
+    final_mae = winner_data['mae']
+
+    final_model_type = _get_model_type_from_name(final_model_name)
+
+    print(f"\n🏆 Победитель: {final_model_name}")
+    print(f"   Тип модели (для дочерних функций): {final_model_type}")
+    print(f"   R²: {final_r2:.4f}")
+    print(f"   MAE: {final_mae:.2f} SR")
+    print(f"\n📊 Сравнение кандидатов:")
+    print(f"   Простая модель ({baseline['best_name']}): R²={baseline['simple_r2']:.4f}, MAE={baseline['simple_mae']:.2f}")
+    print(f"   Optuna ({hp_search['optuna_model_name']}): R²={hp_search['optuna_r2']:.4f}, MAE={hp_search['optuna_mae']:.2f}")
+    print(f"   GridSearchCV: R²={hp_search['gs_r2']:.4f}, MAE={hp_search['gs_mae']:.2f}")
+
+    if winner == 'simple':
+        print(f"\n⚠️ ВНИМАНИЕ: Простая модель работает ЛУЧШЕ сложных!")
+        print(f"   Принцип Occam's Razor: если простая модель не хуже сложной, выбираем простую")
+        print(f"   Разница R²: {baseline['simple_r2'] - hp_search['optuna_r2']:+.4f} vs Optuna, "
+              f"{baseline['simple_r2'] - hp_search['gs_r2']:+.4f} vs GridSearchCV")
+
+    model_selection_details = {
+        'winner': winner,
+        'simple_model_name': baseline['best_name'],
+        'simple_r2': baseline['simple_r2'],
+        'simple_mae': baseline['simple_mae'],
+        'optuna_model_name': hp_search['optuna_model_name'],
+        'optuna_r2': hp_search['optuna_r2'],
+        'optuna_mae': hp_search['optuna_mae'],
+        'optuna_params': hp_search['optuna_params'],
+        'gridsearch_r2': hp_search['gs_r2'],
+        'gridsearch_mae': hp_search['gs_mae'],
+        'gridsearch_params': hp_search['gs_params'],
+        'final_model_name': final_model_name,
+        'final_model_type': final_model_type,
+        'final_r2': final_r2,
+        'final_mae': final_mae,
+    }
+
+    return {
+        'winner': winner, 'final_pipeline': final_pipeline, 'final_model_name': final_model_name,
+        'final_model_type': final_model_type, 'final_params': final_params,
+        'final_r2': final_r2, 'final_mae': final_mae,
+        'model_selection_details': model_selection_details,
+    }
+
+
+def _run_post_training_analysis(
+        X_train: pd.DataFrame, X_test: pd.DataFrame,
+        y_train: pd.Series, y_test: pd.Series,
+        num_feat: List[str], cat_feat: List[str], bin_feat: List[str], bool_feat: List[str],
+        preprocessor: ColumnTransformer,
+        selection: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Шаги 7-9 run_ml_pipeline(): Ablation Study, Bootstrap Ablation,
+    Sensitivity Analysis, финальная кросс-валидация.
+
+    🔧 РЕФАКТОРИНГ: имя функции — прямая рекомендация куратора
+    ("_run_post_training_analysis()"). Логика не изменилась.
+    """
+    final_params = selection['final_params']
+    final_model_type = selection['final_model_type']
+    final_r2 = selection['final_r2']
+    final_mae = selection['final_mae']
+
+    print(f"\n{'=' * 70}")
+    print("ABLATION STUDY (анализ вклада групп признаков)")
+    print(f"{'=' * 70}")
+
+    ablation_results = run_ablation_study(
+        X_train, X_test, y_train, y_test,
+        num_feat, cat_feat, bin_feat,
+        bool_features=bool_feat,
+        best_params=final_params,
+        model_name=final_model_type
+    )
+
+    print(f"\n{'=' * 70}")
+    print("BOOTSTRAP ABLATION (точечный анализ отдельных признаков)")
+    print(f"{'=' * 70}")
+
+    bootstrap_ablation_results = run_bootstrap_ablation(
+        X_train, X_test, y_train, y_test,
+        numeric_features=num_feat, categorical_features=cat_feat,
+        binary_features=bin_feat, bool_features=bool_feat,
+        best_params=final_params, model_name=final_model_type,
+        features_to_test=None,
+        n_repeats=15
+    )
+
+    print(f"\n{'=' * 70}")
+    print("SENSITIVITY ANALYSIS (анализ чувствительности к объёму данных)")
+    print(f"{'=' * 70}")
+
+    sensitivity_results = sensitivity_analysis(
+        X_train, X_test, y_train, y_test,
+        preprocessor,
+        best_params=final_params,
+        fractions=[0.5, 0.6, 0.7, 0.8, 0.9],
+        n_repeats=3,
+        baseline_r2=final_r2,
+        baseline_mae=final_mae,
+        model_name=final_model_type
+    )
+
+    X_full = pd.concat([X_train, X_test]).sort_index()
+    y_full = pd.concat([y_train, y_test]).sort_index()
+
+    cv_scores, cv_pipeline = cross_validate_model(
+        X_full, y_full,
+        preprocessor,
+        best_params=final_params,
+        model_name=final_model_type
+    )
+
+    return {
+        'ablation_results': ablation_results,
+        'bootstrap_ablation_results': bootstrap_ablation_results,
+        'sensitivity_results': sensitivity_results,
+        'cv_scores': cv_scores, 'cv_pipeline': cv_pipeline,
+        'X_full': X_full, 'y_full': y_full,
+    }
+
+
 def run_ml_pipeline(
         df_unique: pd.DataFrame,
         eda_results: Dict[str, Any],
@@ -3319,6 +3625,12 @@ def run_ml_pipeline(
     параметр model_name. Это обеспечивает согласованность всех анализов с
     финальной моделью, без жёстких зашивок.
 
+    🔧 РЕФАКТОРИНГ (куратор): раньше это была одна функция на 325 строк.
+    Теперь — тонкий оркестратор из 4 приватных шагов (_prepare_and_compare_baseline,
+    _run_hyperparameter_search, _select_best_model, _run_post_training_analysis),
+    каждый из которых можно читать и тестировать отдельно. Логика вычислений
+    не изменилась ни на строку — это чистое извлечение метода (extract method).
+
     Args:
         df_unique: Датасет без дубликатов для построения признаков и обучения моделей.
         eda_results: Результаты этапа EDA, содержащие вердикты по `sellable_online`
@@ -3339,277 +3651,52 @@ def run_ml_pipeline(
             bootstrap_ablation_results, sensitivity_results, leakage_verdict,
             model_selection_details.
     """
+    baseline = _prepare_and_compare_baseline(df_unique, eda_results)
 
-    # ========================================================================
-    # 🔧 Вспомогательная функция: преобразование имени модели в тип
-    # ========================================================================
-    def _get_model_type_from_name(model_name: str) -> str:
-        """Преобразует имя модели в формат, понятный дочерним функциям.
-
-        Поддерживает варианты:
-        - 'HistGradientBoosting', 'HistGB', 'hist' → 'HistGB'
-        - 'RandomForest', 'RF', 'RandomForest + Optuna (Exp4)' → 'RandomForest'
-        - 'XGBoost', 'XGB', 'XGBoost + Optuna (Exp1)' → 'XGBoost'
-        - Fallback → 'RandomForest'
-        """
-        name_lower = model_name.lower().replace(' ', '').replace('_', '')
-
-        if 'histgradient' in name_lower or 'histgb' in name_lower or name_lower == 'hist':
-            return 'HistGB'
-        elif 'randomforest' in name_lower or name_lower == 'rf':
-            return 'RandomForest'
-        elif 'xgboost' in name_lower or name_lower == 'xgb':
-            return 'XGBoost'
-        else:
-            print(f"\n⚠️ Не удалось определить тип модели из '{model_name}', используем RandomForest")
-            return 'RandomForest'
-
-    print("\n" + "=" * 70)
-    print("ПОДГОТОВКА ДАННЫХ ДЛЯ ML")
-    print("=" * 70)
-
-    # Извлекаем параметры из eda_results
-    sellable_verdict = eda_results['sellable_verdict']
-    old_price_check = eda_results['old_price_check']
-
-    # 1. Подготовка данных
-    X_train, X_test, y_train, y_test, X, y, num_feat, cat_feat, bin_feat, bool_feat = prepare_ml_data(
-        df_unique,
-        sellable_verdict=sellable_verdict,
-        old_price_verdict=old_price_check['verdict'],
-        old_price_features_to_use=old_price_check['features_to_use']
+    hp_search = _run_hyperparameter_search(
+        baseline['X_train'], baseline['X_test'], baseline['y_train'], baseline['y_test'],
+        baseline['preprocessor'], rerun_optuna, trials, cv
     )
 
-    # 2. Сравнение моделей
-    results_df, best_name, best_pipeline, preprocessor = compare_models(
-        X_train, X_test, y_train, y_test, num_feat, cat_feat, bin_feat, bool_feat
+    selection = _select_best_model(baseline, hp_search)
+
+    post = _run_post_training_analysis(
+        baseline['X_train'], baseline['X_test'], baseline['y_train'], baseline['y_test'],
+        baseline['num_feat'], baseline['cat_feat'], baseline['bin_feat'], baseline['bool_feat'],
+        baseline['preprocessor'], selection
     )
 
-    print(f"\n{'=' * 70}")
-    print(" ФИНАЛЬНАЯ МОДЕЛЬ (после сравнения)")
-    print(f"{'=' * 70}")
-    print(f"\n Лучшая модель: {best_name}")
-    print(f"   R² (тест): {results_df.iloc[0]['R2']:.4f}")
-    print(f"   MAE: {results_df.iloc[0]['MAE']:.2f}")
-
-    # Сохраняем метрики простой модели для сравнения
-    simple_r2 = results_df.iloc[0]['R2']
-    simple_mae = results_df.iloc[0]['MAE']
-
-    # 3. Проверка утечки данных
-    r2_with, r2_without, r2_diff, verdict = check_data_leakage(
-        X_train, X_test, y_train, y_test,
-        num_feat, cat_feat, bin_feat, bool_feat
-    )
-
-    if verdict == "LEAKAGE":
-        print("\n⚠️ Удаляем признак category_price_level из-за утечки!")
-        X_train = X_train.drop(columns=['category_price_level'])
-        X_test = X_test.drop(columns=['category_price_level'])
-        X = X.drop(columns=['category_price_level'])
-        num_feat = [f for f in num_feat if f != 'category_price_level']
-    else:
-        print(f"\n Оставляем признак category_price_level (verdict: {verdict})")
-
-    # 4. Optuna
-    print("\n" + "=" * 70)
-    print("OPTUNA: БАЙЕСОВСКАЯ ОПТИМИЗАЦИЯ ГИПЕРПАРАМЕТРОВ")
-    print("=" * 70)
-
-    optuna_pipeline, optuna_model_name, study_exp1, study_exp2, optuna_comparison, optuna_params = optimize_with_optuna_experiments(
-        X_train, X_test, y_train, y_test, preprocessor,
-        rerun=rerun_optuna,
-        n_trials_1=trials or 50,
-        n_trials_2=trials or 75,
-        n_trials_3=trials or 75,
-        cv_folds=cv or 5
-    )
-
-    # Сохраняем метрики Optuna для сравнения
-    y_pred_optuna_log = optuna_pipeline.predict(X_test)
-    y_pred_optuna = np.expm1(y_pred_optuna_log)
-    optuna_r2 = r2_score(y_test, y_pred_optuna)
-    optuna_mae = mean_absolute_error(y_test, y_pred_optuna)
-
-    print(f"\n📊 Метрики Optuna на тесте:")
-    print(f"   Модель: {optuna_model_name}")
-    print(f"   R² (тест): {optuna_r2:.4f}")
-    print(f"   MAE (тест): {optuna_mae:.2f} SR")
-
-    # 5. GridSearchCV
-    print(f"\n{'=' * 70}")
-    print("GRIDSEARCHCV ДЛЯ ЛУЧШЕЙ МОДЕЛИ ")
-    print(f"{'=' * 70}")
-
-    gridsearch_results = gridsearch_best_model(
-        X_train, X_test, y_train, y_test, preprocessor
-    )
-
-    gs_pipeline = gridsearch_results['best_model']
-    gs_r2 = gridsearch_results['test_r2']
-    gs_mae = gridsearch_results['test_mae']
-    gs_params = gridsearch_results['best_params']
-
-    print(f"\n📊 Метрики GridSearchCV на тесте:")
-    print(f"   R² (тест): {gs_r2:.4f}")
-    print(f"   MAE (тест): {gs_mae:.2f} SR")
-
-    # ========================================================================
-    # 6. Сравнение Optuna, GridSearchCV и простой модели
-    # ========================================================================
-    print(f"\n{'=' * 70}")
-    print(" СРАВНЕНИЕ ВСЕХ МОДЕЛЕЙ")
-    print(f"{'=' * 70}")
-
-    # Сравниваем три кандидата: простая модель, Optuna, GridSearchCV
-    candidates = {
-        'simple': {'r2': simple_r2, 'mae': simple_mae, 'name': best_name, 'pipeline': best_pipeline, 'params': None},
-        'optuna': {'r2': optuna_r2, 'mae': optuna_mae, 'name': optuna_model_name, 'pipeline': optuna_pipeline, 'params': optuna_params},
-        'gridsearch': {'r2': gs_r2, 'mae': gs_mae, 'name': 'RandomForest + GridSearchCV', 'pipeline': gs_pipeline, 'params': gs_params}
-    }
-
-    # Выбираем лучшую модель по R²
-    best_candidate = max(candidates.items(), key=lambda x: x[1]['r2'])
-    winner = best_candidate[0]
-    winner_data = best_candidate[1]
-
-    final_pipeline = winner_data['pipeline']
-    final_model_name = winner_data['name']
-    final_params = winner_data['params']
-    final_r2 = winner_data['r2']
-    final_mae = winner_data['mae']
-
-    # 🔧 ДИНАМИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ТИПА МОДЕЛИ
-    final_model_type = _get_model_type_from_name(final_model_name)
-
-    print(f"\n🏆 Победитель: {final_model_name}")
-    print(f"   Тип модели (для дочерних функций): {final_model_type}")
-    print(f"   R²: {final_r2:.4f}")
-    print(f"   MAE: {final_mae:.2f} SR")
-    print(f"\n📊 Сравнение кандидатов:")
-    print(f"   Простая модель ({best_name}): R²={simple_r2:.4f}, MAE={simple_mae:.2f}")
-    print(f"   Optuna ({optuna_model_name}): R²={optuna_r2:.4f}, MAE={optuna_mae:.2f}")
-    print(f"   GridSearchCV: R²={gs_r2:.4f}, MAE={gs_mae:.2f}")
-
-    # Проверка принципа Occam's Razor
-    if winner == 'simple':
-        print(f"\n⚠️ ВНИМАНИЕ: Простая модель работает ЛУЧШЕ сложных!")
-        print(f"   Принцип Occam's Razor: если простая модель не хуже сложной, выбираем простую")
-        print(f"   Разница R²: {simple_r2 - optuna_r2:+.4f} vs Optuna, {simple_r2 - gs_r2:+.4f} vs GridSearchCV")
-
-    # Сохраняем детали выбора модели для отчёта
-    model_selection_details = {
-        'winner': winner,
-        'simple_model_name': best_name,
-        'simple_r2': simple_r2,
-        'simple_mae': simple_mae,
-        'optuna_model_name': optuna_model_name,
-        'optuna_r2': optuna_r2,
-        'optuna_mae': optuna_mae,
-        'optuna_params': optuna_params,
-        'gridsearch_r2': gs_r2,
-        'gridsearch_mae': gs_mae,
-        'gridsearch_params': gs_params,
-        'final_model_name': final_model_name,
-        'final_model_type': final_model_type,
-        'final_r2': final_r2,
-        'final_mae': final_mae,
-    }
-
-    # 7. Ablation Study
-    print(f"\n{'=' * 70}")
-    print("ABLATION STUDY (анализ вклада групп признаков)")
-    print(f"{'=' * 70}")
-
-    # 🔧 Передаём параметры и тип финальной модели (никаких зашивок!)
-    ablation_results = run_ablation_study(
-        X_train, X_test, y_train, y_test,
-        num_feat, cat_feat, bin_feat,
-        bool_features=bool_feat,
-        best_params=final_params,
-        model_name=final_model_type
-    )
-
-    # 7.1. Bootstrap Ablation — точечная проверка отдельных признаков с
-    # динамически вычисляемыми CI (дополняет групповой Ablation Study выше:
-    # изолирует вклад признаков ВНУТРИ одной группы, напр. volume отдельно
-    # от width/height/depth, чего групповой тест сделать не может)
-    print(f"\n{'=' * 70}")
-    print("BOOTSTRAP ABLATION (точечный анализ отдельных признаков)")
-    print(f"{'=' * 70}")
-
-    bootstrap_ablation_results = run_bootstrap_ablation(
-        X_train, X_test, y_train, y_test,
-        numeric_features=num_feat, categorical_features=cat_feat,
-        binary_features=bin_feat, bool_features=bool_feat,
-        best_params=final_params, model_name=final_model_type,
-        features_to_test=None,  # None = проверить ВСЕ числовые и бинарные признаки
-        n_repeats=15
-    )
-
-    # 8. Sensitivity Analysis
-    print(f"\n{'=' * 70}")
-    print("SENSITIVITY ANALYSIS (анализ чувствительности к объёму данных)")
-    print(f"{'=' * 70}")
-
-    # 🔧 Передаём параметры и тип финальной модели (никаких зашивок!)
-    sensitivity_results = sensitivity_analysis(
-        X_train, X_test, y_train, y_test,
-        preprocessor,
-        best_params=final_params,
-        fractions=[0.5, 0.6, 0.7, 0.8, 0.9],
-        n_repeats=3,
-        baseline_r2=final_r2,
-        baseline_mae=final_mae,
-        model_name=final_model_type
-    )
-
-    # 9. Кросс-валидация
-    X_full = pd.concat([X_train, X_test]).sort_index()
-    y_full = pd.concat([y_train, y_test]).sort_index()
-
-    # 🔧 Передаём параметры и тип финальной модели (никаких зашивок!)
-    cv_scores, cv_pipeline = cross_validate_model(
-        X_full, y_full,
-        preprocessor,
-        best_params=final_params,
-        model_name=final_model_type
-    )
-
-    # ========================================================================
-    # ИТОГОВЫЙ ОТЧЁТ
-    # ========================================================================
     print(f"\n{'=' * 70}")
     print(" ИТОГИ ML-ПАЙПЛАЙНА")
     print(f"{'=' * 70}")
-    print(f"\n🏆 Финальная модель: {final_model_name}")
-    print(f"   Тип модели: {final_model_type}")
-    print(f"   R² (тест): {final_r2:.4f}")
-    print(f"   MAE (тест): {final_mae:.2f} SR")
-    print(f"   R² (CV): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-    print(f"   Способ выбора: {winner.upper()}")
+    print(f"\n🏆 Финальная модель: {selection['final_model_name']}")
+    print(f"   Тип модели: {selection['final_model_type']}")
+    print(f"   R² (тест): {selection['final_r2']:.4f}")
+    print(f"   MAE (тест): {selection['final_mae']:.2f} SR")
+    print(f"   R² (CV): {post['cv_scores'].mean():.4f} ± {post['cv_scores'].std():.4f}")
+    print(f"   Способ выбора: {selection['winner'].upper()}")
 
     return MLPipelineResult(
-        X_train=X_train,
-        X_test=X_test,
-        y_train=y_train,
-        y_test=y_test,
-        X_full=X_full,
-        y_full=y_full,
-        num_feat=num_feat,
-        cat_feat=cat_feat,
-        bin_feat=bin_feat,
-        bool_feat=bool_feat,
-        preprocessor=preprocessor,
-        best_model_pipeline=final_pipeline,
-        best_model_name=final_model_name,
-        gridsearch_results=gridsearch_results,
-        cv_scores=cv_scores,
-        ablation_results=ablation_results,
-        bootstrap_ablation_results=bootstrap_ablation_results,
-        sensitivity_results=sensitivity_results,
-        leakage_verdict=verdict,
-        model_selection_details=model_selection_details,
+        X_train=baseline['X_train'],
+        X_test=baseline['X_test'],
+        y_train=baseline['y_train'],
+        y_test=baseline['y_test'],
+        X_full=post['X_full'],
+        y_full=post['y_full'],
+        num_feat=baseline['num_feat'],
+        cat_feat=baseline['cat_feat'],
+        bin_feat=baseline['bin_feat'],
+        bool_feat=baseline['bool_feat'],
+        preprocessor=baseline['preprocessor'],
+        best_model_pipeline=selection['final_pipeline'],
+        best_model_name=selection['final_model_name'],
+        gridsearch_results=hp_search['gridsearch_results'],
+        cv_scores=post['cv_scores'],
+        ablation_results=post['ablation_results'],
+        bootstrap_ablation_results=post['bootstrap_ablation_results'],
+        sensitivity_results=post['sensitivity_results'],
+        leakage_verdict=baseline['verdict'],
+        model_selection_details=selection['model_selection_details'],
     )
 
 # ==============================================================================
