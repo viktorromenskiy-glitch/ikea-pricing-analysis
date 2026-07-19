@@ -19,6 +19,8 @@
 import os
 import warnings
 import logging
+import dataclasses
+from dataclasses import dataclass, field
 
 # 🔑 КЛЮЧЕВОЕ РЕШЕНИЕ: переменная окружения для дочерних процессов
 os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning,ignore::FutureWarning'
@@ -93,6 +95,46 @@ matplotlib.use('Agg')
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # =============================================================================
 SELLABLE_ONLINE_VERDICT = "KEEP"  # По умолчанию оставляем, анализ решит
+
+# =============================================================================
+# СТРУКТУРЫ ДАННЫХ (dataclass вместо словаря — рекомендация куратора)
+# =============================================================================
+
+@dataclass
+class MLPipelineResult:
+    """Результат работы run_ml_pipeline() — типобезопасная замена словаря.
+
+    🔧 РЕФАКТОРИНГ: раньше run_ml_pipeline() возвращал plain dict с 17 ключами,
+    доступ к которым (ml_results['key']) не проверяется на этапе написания
+    кода — опечатка в имени ключа превращается в KeyError только во время
+    выполнения, и то не сразу, а в момент первого обращения к этому ключу
+    (может быть далеко от места самой опечатки). Dataclass даёт то же самое
+    удобство передачи данных одним объектом, но с проверкой имён атрибутов
+    через автодополнение IDE и понятный AttributeError сразу в месте опечатки.
+
+    Все поля обязательны (без значений по умолчанию) — ровно те же 17 полей,
+    что были ключами словаря, просто теперь это `.attribute`, а не `['key']`.
+    """
+    X_train: pd.DataFrame
+    X_test: pd.DataFrame
+    y_train: pd.Series
+    y_test: pd.Series
+    X_full: pd.DataFrame
+    y_full: pd.Series
+    num_feat: List[str]
+    cat_feat: List[str]
+    bin_feat: List[str]
+    bool_feat: List[str]
+    preprocessor: ColumnTransformer
+    best_model_pipeline: Pipeline
+    best_model_name: str
+    gridsearch_results: Dict[str, Any]
+    cv_scores: np.ndarray
+    ablation_results: pd.DataFrame
+    bootstrap_ablation_results: pd.DataFrame
+    sensitivity_results: pd.DataFrame
+    leakage_verdict: str
+    model_selection_details: Dict[str, Any]
 
 # Настройки визуализации
 plt.style.use('seaborn-v0_8-whitegrid')
@@ -2714,7 +2756,7 @@ def run_ml_pipeline(
         rerun_optuna: bool = False,
         trials: Optional[int] = None,
         cv: Optional[int] = None
-) -> Dict[str, Any]:
+) -> 'MLPipelineResult':
     """
     Управляет полным циклом машинного обучения и оценки моделей.
 
@@ -2746,29 +2788,15 @@ def run_ml_pipeline(
         cv: Количество блоков (фолдов) при кросс-валидации.
 
     Returns:
-        Словарь с объектами обучения и результатами валидации:
-            {
-                'X_train': pd.DataFrame,
-                'X_test': pd.DataFrame,
-                'y_train': pd.Series,
-                'y_test': pd.Series,
-                'X_full': pd.DataFrame,
-                'y_full': pd.Series,
-                'num_feat': list[str],
-                'cat_feat': list[str],
-                'bin_feat': list[str],
-                'bool_feat': list[str],
-                'preprocessor': ColumnTransformer,
-                'best_model_pipeline': Pipeline,
-                'best_model_name': str,
-                'gridsearch_results': dict,
-                'cv_scores': np.ndarray,
-                'ablation_results': pd.DataFrame,
-                'bootstrap_ablation_results': pd.DataFrame,
-                'sensitivity_results': pd.DataFrame,
-                'leakage_verdict': str,
-                'model_selection_details': dict
-            }
+        MLPipelineResult: Dataclass (не словарь — см. класс MLPipelineResult выше
+            по файлу) с объектами обучения и результатами валидации. Поля те же,
+            что раньше были ключами словаря, доступ теперь через точку:
+            result.X_train вместо result['X_train'].
+            Поля: X_train, X_test, y_train, y_test, X_full, y_full, num_feat,
+            cat_feat, bin_feat, bool_feat, preprocessor, best_model_pipeline,
+            best_model_name, gridsearch_results, cv_scores, ablation_results,
+            bootstrap_ablation_results, sensitivity_results, leakage_verdict,
+            model_selection_details.
     """
 
     # ========================================================================
@@ -3020,34 +3048,34 @@ def run_ml_pipeline(
     print(f"   R² (CV): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"   Способ выбора: {winner.upper()}")
 
-    return {
-        'X_train': X_train,
-        'X_test': X_test,
-        'y_train': y_train,
-        'y_test': y_test,
-        'X_full': X_full,
-        'y_full': y_full,
-        'num_feat': num_feat,
-        'cat_feat': cat_feat,
-        'bin_feat': bin_feat,
-        'bool_feat': bool_feat,
-        'preprocessor': preprocessor,
-        'best_model_pipeline': final_pipeline,
-        'best_model_name': final_model_name,
-        'gridsearch_results': gridsearch_results,
-        'cv_scores': cv_scores,
-        'ablation_results': ablation_results,
-        'bootstrap_ablation_results': bootstrap_ablation_results,
-        'sensitivity_results': sensitivity_results,
-        'leakage_verdict': verdict,
-        'model_selection_details': model_selection_details,
-    }
+    return MLPipelineResult(
+        X_train=X_train,
+        X_test=X_test,
+        y_train=y_train,
+        y_test=y_test,
+        X_full=X_full,
+        y_full=y_full,
+        num_feat=num_feat,
+        cat_feat=cat_feat,
+        bin_feat=bin_feat,
+        bool_feat=bool_feat,
+        preprocessor=preprocessor,
+        best_model_pipeline=final_pipeline,
+        best_model_name=final_model_name,
+        gridsearch_results=gridsearch_results,
+        cv_scores=cv_scores,
+        ablation_results=ablation_results,
+        bootstrap_ablation_results=bootstrap_ablation_results,
+        sensitivity_results=sensitivity_results,
+        leakage_verdict=verdict,
+        model_selection_details=model_selection_details,
+    )
 
 # ==============================================================================
 # ОРКЕСТРАТОР ИНТЕРПРЕТАЦИИ
 # ==============================================================================
 
-def run_interpretation_pipeline(ml_results: dict) -> dict:
+def run_interpretation_pipeline(ml_results: 'MLPipelineResult') -> dict:
     """
     Запускает сквозной пайплайн интерпретации и бизнес-валидации модели.
 
@@ -3116,14 +3144,17 @@ def run_interpretation_pipeline(ml_results: dict) -> dict:
      predictions = final_model.predict(new_data)
     """
 
-    best_model_pipeline = ml_results['best_model_pipeline']
-    best_model_name = ml_results.get('best_model_name', 'Unknown Model')
-    X_train = ml_results['X_train']
-    X_test = ml_results['X_test']
-    y_train = ml_results['y_train']
-    y_test = ml_results['y_test']
-    X_full = ml_results['X_full']
-    y_full = ml_results['y_full']
+    best_model_pipeline = ml_results.best_model_pipeline
+    # 🔧 best_model_name — обязательное поле dataclass (не может отсутствовать,
+    # в отличие от старого dict, где .get(..., 'Unknown Model') был защитой
+    # от KeyError). Прямой доступ через точку.
+    best_model_name = ml_results.best_model_name
+    X_train = ml_results.X_train
+    X_test = ml_results.X_test
+    y_train = ml_results.y_train
+    y_test = ml_results.y_test
+    X_full = ml_results.X_full
+    y_full = ml_results.y_full
 
     # 1. Анализ важности признаков
     print(f"\n{'=' * 70}")
@@ -3275,7 +3306,7 @@ def run_interpretation_pipeline(ml_results: dict) -> dict:
 
 def print_final_summary(
         eda_results: Dict[str, Any],
-        ml_results: Dict[str, Any],
+        ml_results: 'MLPipelineResult',
         interpretation_results: Dict[str, Any]
 ) -> None:
     """
@@ -3371,8 +3402,8 @@ def print_final_summary(
     # Результаты ML — используем метрики ФИНАЛЬНОЙ модели из baseline_df
     # ========================================================================
     try:
-        best_model_name = ml_results['best_model_name']
-        cv_scores = ml_results['cv_scores']
+        best_model_name = ml_results.best_model_name
+        cv_scores = ml_results.cv_scores
 
         # Получаем метрики финальной модели из baseline_df
         if baseline_df is not None:
@@ -3382,11 +3413,11 @@ def print_final_summary(
                 final_mae = final_model_row['MAE'].values[0]
             else:
                 # Fallback: используем GridSearchCV
-                final_r2 = ml_results['gridsearch_results']['test_r2']
-                final_mae = ml_results['gridsearch_results']['test_mae']
+                final_r2 = ml_results.gridsearch_results['test_r2']
+                final_mae = ml_results.gridsearch_results['test_mae']
         else:
-            final_r2 = ml_results['gridsearch_results']['test_r2']
-            final_mae = ml_results['gridsearch_results']['test_mae']
+            final_r2 = ml_results.gridsearch_results['test_r2']
+            final_mae = ml_results.gridsearch_results['test_mae']
 
         print(f"\n РЕЗУЛЬТАТЫ ML-МОДЕЛИ:")
         print(f"  • Лучшая модель: {best_model_name}")
@@ -3522,7 +3553,7 @@ def print_final_summary(
     # ========================================================================
     # Ablation Study
     # ========================================================================
-    ablation_results = ml_results.get('ablation_results')
+    ablation_results = ml_results.ablation_results
     print(f"\n📊 ABLATION STUDY (вклад групп признаков):")
     if ablation_results is not None and len(ablation_results) > 0:
         try:
@@ -3550,8 +3581,8 @@ def print_final_summary(
     # Дополнительная информация
     # ========================================================================
     try:
-        X_train = ml_results['X_train']
-        X_test = ml_results['X_test']
+        X_train = ml_results.X_train
+        X_test = ml_results.X_test
 
         print(f"\n ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:")
         n_features = len(shap_importance_df) if shap_importance_df is not None else 'N/A'
