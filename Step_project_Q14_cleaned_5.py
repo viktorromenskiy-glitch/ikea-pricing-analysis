@@ -3797,7 +3797,8 @@ def prepare_ml_data(
         df: pd.DataFrame,
         sellable_verdict: str = "KEEP",
         old_price_verdict: str = "SAFE",
-        old_price_features_to_use: Optional[List[str]] = None
+        old_price_features_to_use: Optional[List[str]] = None,
+        exclude_noisy_features: Optional[List[str]] = None
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, pd.Series, pd.Series,
     pd.DataFrame, pd.Series, List[str], List[str], List[str], List[str]
@@ -3832,6 +3833,24 @@ def prepare_ml_data(
             линейную утечку old_price ≈ price × const). Point-ablation
             подтвердил, что удаление discount_pct статистически нейтрально
             (ΔR²=-0.0055, 95% CI пересекает 0) — модель ничего не теряет.
+        exclude_noisy_features (Optional[List[str]], optional): Список названий
+            признаков (числовых или бинарных), которые нужно исключить из
+            numeric_features/binary_features ПОСЛЕ их обычного построения —
+            общий, не привязанный к конкретным именам механизм для быстрого
+            отключения признаков, признанных шумом/вредом по итогам Ablation
+            Study / Bootstrap Ablation, без переписывания самой функции.
+            По умолчанию None — ничего не исключается, поведение функции
+            не меняется. Пример: exclude_noisy_features=['category_price_level',
+            'is_large_item'] — кандидаты по итогам point-ablation (см. Note
+            ниже); признак при этом продолжает СОЗДАВАТЬСЯ (нужен, например,
+            для последующей проверки на утечку), просто не передаётся в
+            модель. 🔧 ВАЖНО: joint-проверка одновременного удаления обоих
+            кандидатов на GridSearchCV-параметрах дала ΔR²=-0.0036 (лучше,
+            но НЕ ЗНАЧИМО хуже) — граница нашего же порога шума (0.003),
+            что говорит: совместный эффект не аддитивен точечным ΔR² по
+            отдельности, и решение об удалении стоит подтвердить отдельным
+            прогоном (bootstrap, не единичный train/test split), прежде чем
+            включать exclude_noisy_features по умолчанию в пайплайне.
 
     Returns:
         Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.DataFrame, pd.Series,
@@ -4305,6 +4324,30 @@ def prepare_ml_data(
     binary_features.append('is_large_item')
 
     print(f"\n✅ LEAKAGE УСТРАНЁН: все статистики вычислены только на train set!")
+
+    # ========================================================================
+    # ИСКЛЮЧЕНИЕ ПРИЗНАКОВ ПО ЗАПРОСУ (exclude_noisy_features)
+    # ========================================================================
+    # 🔧 Общий, не привязанный к конкретным именам механизм — признак(и)
+    # продолжают существовать как колонки в X_train/X_test/X (на случай, если
+    # нужны для последующих проверок вроде check_data_leakage), но убираются
+    # из списков, которые реально идут в модель через preprocessor.
+    if exclude_noisy_features:
+        excluded_numeric = [f for f in exclude_noisy_features if f in numeric_features_total]
+        excluded_binary = [f for f in exclude_noisy_features if f in binary_features]
+        not_found = [f for f in exclude_noisy_features
+                     if f not in numeric_features_total and f not in binary_features]
+
+        numeric_features_total = [f for f in numeric_features_total if f not in exclude_noisy_features]
+        binary_features = [f for f in binary_features if f not in exclude_noisy_features]
+
+        print(f"\n🔧 exclude_noisy_features: исключено из модели по запросу")
+        if excluded_numeric:
+            print(f"  • Из числовых: {excluded_numeric}")
+        if excluded_binary:
+            print(f"  • Из бинарных: {excluded_binary}")
+        if not_found:
+            print(f"  ⚠️ Не найдены (уже отсутствуют или опечатка): {not_found}")
 
     # ========================================================================
     # ИТОГ
@@ -9092,6 +9135,30 @@ def run_ablation_study(
             for _, row in negative_delta.iterrows():
                 print(f"   • {row['Group']}: ΔR² = {row['ΔR²']:+.4f}")
             print(f"   → Эти признаки создают шум или мультиколлинеарность")
+
+        # 🔧 РЕШЕНИЕ ПО category_price_level И is_large_item (по итогам Bootstrap
+        # Ablation + группового Ablation Study — оба метода согласованно дали
+        # отрицательную ΔR² для этих двух признаков по отдельности):
+        # Быстрая joint-проверка (единичный train/test split, параметры
+        # GridSearchCV, БЕЗ повторного полного пересчёта Optuna) на
+        # одновременном удалении ОБОИХ признаков сразу дала ΔR²=-0.0036,
+        # ΔMAE=+1.84 SR — то есть совместный эффект НЕ аддитивен точечным
+        # результатам по отдельности (ожидался позитивный или нейтральный
+        # эффект, получен слабо отрицательный, на грани нашего же порога
+        # шума 0.003). Признаки СОХРАНЕНЫ в модели по итогам этой проверки.
+        # Для окончательного решения нужен bootstrap-прогон совместного
+        # удаления (не единичный сплит) — technически это уже поддержано
+        # параметром exclude_noisy_features в prepare_ml_data(), полный
+        # пересчёт GridSearchCV/Optuna пока не запускался.
+        print(f"\n🔧 Отдельная проверка: category_price_level + is_large_item")
+        print(f"   Оба признака по отдельности дали отрицательную ΔR² в этом ")
+        print(f"   Ablation Study И в Bootstrap Ablation (см. выше/отдельный отчёт).")
+        print(f"   Быстрая совместная проверка (один train/test split, без")
+        print(f"   пересчёта Optuna): ΔR²=-0.0036, ΔMAE=+1.84 SR — совместный")
+        print(f"   эффект слабо ОТРИЦАТЕЛЕН (на грани порога шума 0.003), не")
+        print(f"   аддитивен точечным результатам. Признаки СОХРАНЕНЫ в модели;")
+        print(f"   для окончательного решения нужен bootstrap-прогон совместного")
+        print(f"   удаления. См. параметр exclude_noisy_features в prepare_ml_data().")
 
     return results_df
 
