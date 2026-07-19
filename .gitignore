@@ -1,0 +1,6 @@
+﻿logs/
+plots_step/
+reports_step/
+models/
+optuna_cache.json
+*.log
