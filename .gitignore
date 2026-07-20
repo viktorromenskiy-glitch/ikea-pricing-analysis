@@ -4,3 +4,19 @@ reports_step/
 models/
 optuna_cache.json
 *.log
+
+# Игнорируем всё в этой папке...
+*
+
+# ...кроме файлов проекта IKEA
+!ikea_core.py
+!ikea_data_prep.py
+!ikea_eda.py
+!ikea_hypotheses.py
+!ikea_model.py
+!ikea_interpret.py
+!ikea_main.py
+!README.md
+!README_ru.md
+!requirements.txt
+!.gitignore
