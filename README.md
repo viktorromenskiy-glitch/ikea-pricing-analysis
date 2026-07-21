@@ -9,25 +9,25 @@ An end-to-end data science project on the [TidyTuesday IKEA dataset](https://git
 | Metric | Value |
 |---|---|
 | Final model | Random Forest + Optuna (Bayesian HP search) |
-| Test R² | **0.8453** |
-| 5-fold CV R² | 0.8616 ± 0.0132 |
-| Test MAE | 303.97 SR |
-| vs. naive baseline (median price) | +66.2% MAE improvement |
-| vs. untuned Random Forest | +3.7% (within CV noise — see notes below) |
-| Estimated revenue impact vs. category-median pricing | +35.3% |
+| Test R² | **0.8296** |
+| 5-fold CV R² | 0.8609 ± 0.0126 |
+| Test MAE | 312.00 SR |
+| vs. naive baseline (median price) | +65.3% MAE improvement |
+| vs. untuned Random Forest | untuned RF actually scored **0.0076 higher on R²** (0.8372 vs 0.8296) — the gap is within CV noise, and is reported honestly rather than smoothed over (see notes below) |
+| Estimated revenue impact vs. category-median pricing | +34.4% |
 
-**Top price drivers** (SHAP + built-in feature importance, in agreement): product **width** (~29%), **volume** (~23%), description length, designer popularity, and category.
+**Top price drivers** (SHAP + built-in feature importance, in agreement): product **width** (~42%), **height** (~11%), **depth** (~10%), description length, and category price level.
 
 ## What makes this project different from a typical "train a model, report R²" notebook
 
-- **Every feature-selection decision is backed by two independent statistical tests**, not just one importance ranking. A group-level Ablation Study (remove whole correlated groups like all dimensions together) is combined with a point-level Bootstrap Ablation (remove one feature at a time, 15 bootstrap repeats, 95% CI on the effect) — because these two methods disagree in informative ways when features are collinear, and that disagreement itself is documented and explained rather than hidden.
-- **Data leakage is treated as a first-class concern, not an afterthought.** Three separate leakage checks are implemented: a correlation-based check for `old_price` (structural leakage via the discount formula was caught and excluded even though a naive correlation threshold would have kept it), a near-constant-feature check for `sellable_online`, and strict train-only computation of any statistic derived from the target (`category_price_level`, `designer_freq`, `is_large_item` are all computed exclusively on the training fold).
-- **The Optuna hyperparameter cache is fingerprinted**, not just cached blindly. It's invalidated automatically if the feature set or search parameters change, so stale cached metrics can never silently leak into a report after a code change.
-- **Three candidate models compete honestly**: a plain baseline comparison, an Optuna Bayesian search, and a GridSearchCV pass — the winner is picked by test R², and if the simplest model wins (Occam's razor check), the pipeline says so explicitly instead of always crowning the fanciest one.
+- **Every feature-selection decision is backed by two independent statistical tests**, not just one importance ranking. A group-level Ablation Study (remove whole correlated groups like all dimensions together) is combined with a point-level Bootstrap Ablation (remove one feature at a time, **40 bootstrap repeats**, 95% CI on the effect). An earlier version of this project used 15 repeats and got a materially different (wrong) verdict for one feature — see "Honest limitations" below for what that taught us about statistical power.
+- **Data leakage is treated as a first-class concern, not an afterthought.** Three separate leakage checks are implemented: a correlation-based check for `old_price` (structural leakage via the discount formula was caught and excluded even though a naive correlation threshold would have kept it), a near-constant-feature check for `sellable_online`, and strict train-only computation of any statistic derived from the target (`category_price_level` and `designer_freq` are computed exclusively on the training fold; `is_large_item` is computed the same way but is no longer a model feature — see below).
+- **The Optuna hyperparameter cache is fingerprinted**, not just cached blindly. It's invalidated automatically if the feature set or search parameters change, so stale cached metrics can never silently leak into a report after a code change — this exact mechanism is what caught a stale cache during development and forced a clean re-run.
+- **Three candidate models compete honestly**: a plain baseline comparison, an Optuna Bayesian search, and a GridSearchCV pass — the winner is picked by test R², and the pipeline reports the comparison against the untuned baseline explicitly rather than only showing the winner in the best possible light.
 
 ## Repository structure
 
-The pipeline was originally a single ~9,900-line script; it has since been refactored into 7 focused modules, each independently importable and testable:
+The pipeline was originally a single ~9,900-line script; it has since been refactored into 7 focused modules (~10,000 lines total), each independently importable and testable:
 
 ```
 ikea_main.py           # entry point — orchestrates the full pipeline, final report
@@ -59,7 +59,7 @@ The dataset is downloaded automatically from the TidyTuesday GitHub repository o
 ## Methodology overview
 
 1. **Data preparation** — deduplication (3,694 → 2,962 unique SKUs), missing-dimension imputation, designer name normalization.
-2. **Statistical hypothesis testing** — 9 hypotheses (e.g. "larger volume → higher price", "team-designed products cost more", "premium materials command a price premium") tested with Mann-Whitney U, Kruskal-Wallis, and bootstrap confidence intervals on the median difference.
+2. **Statistical hypothesis testing** — 9 hypotheses (e.g. "larger volume → higher price", "team-designed products cost more", "premium materials command a price premium") tested with Mann-Whitney U, Kruskal-Wallis, and bootstrap confidence intervals on the median difference. (Note: `volume` is a valid, independent EDA/hypothesis-testing question here — it's a different question from whether `volume` should be a *model* feature; see below.)
 3. **Feature engineering with leakage prevention** — dimension-based, NLP-derived (description length/word count/premium-material mentions), and category-context features; any feature derived from a train/test-dependent statistic is computed strictly post-split.
 4. **Model selection** — 8 baseline models compared, then Optuna (4 experiments, Bayesian TPE search) and GridSearchCV compete against each other and against the simple baseline.
 5. **Interpretation** — SHAP values, built-in feature importance, Partial Dependence Plots, residual analysis (including a heteroscedasticity check), and a bootstrap confidence interval on the final MAE.
@@ -68,9 +68,9 @@ The dataset is downloaded automatically from the TidyTuesday GitHub repository o
 
 ## Honest limitations (documented, not hidden)
 
-- The model shows a **systematic underestimation on premium-priced items** (residual analysis, top price segment) and **heteroscedastic residuals** (error variance grows with price) — flagged explicitly rather than papered over.
-- Two features (`category_price_level`, `is_large_item`) showed a consistently negative contribution across both the group and point-level ablation tests individually, but a quick joint-removal check showed a small negative combined effect — so they were kept pending a more rigorous bootstrap-based joint test. The reasoning and the exact numbers are documented in the Ablation Study output rather than silently resolved either way.
-- Random Forest tuned via Optuna beat the untuned baseline by only 0.011 R², which is **smaller than the cross-validation standard deviation** — the pipeline flags this explicitly as not statistically meaningful, in line with the Occam's razor principle it checks for.
+- The model shows a **systematic underestimation on premium-priced items** (residual analysis, top price segment: mean residual +299 SR) and **heteroscedastic residuals** (error variance grows ~150x from the lowest to the highest price quintile) — flagged explicitly rather than papered over.
+- `volume` was removed from the model's feature set — a multicollinearity concern with `depth`/`height`/`width` (it's their product) flagged early on. This went through three rounds of checking: at 15 bootstrap repeats it looked non-significant (noise); at 40 repeats, with the *same* hyperparameters, it flipped to significant (the 15-repeat result was underpowered — a Type II error, not a real "no effect"); after clearing a stale Optuna cache and re-running hyperparameter search from scratch on the current feature set, the final, honest verdict at 40 repeats was that `volume` **hurts** the model slightly (ΔR²=−0.0032). `is_large_item`, which is derived from `volume`, was dropped for the same reason. Removing both **improved** test R² slightly (0.8271 → 0.8302 in a like-for-like comparison), so this wasn't a case of trading accuracy for a cleaner feature set — it was a genuine improvement that three rounds of testing were needed to see clearly. `category_price_level` also showed a small negative effect in some tests but with a wide confidence interval crossing zero, so it was kept as a borderline case rather than removed on weaker evidence.
+- Random Forest tuned via Optuna scored **slightly lower** on test R² than an untuned Random Forest baseline (0.8296 vs 0.8372, a 0.0076 gap — smaller than the cross-validation standard deviation of 0.0126). The two are statistically indistinguishable; the Optuna-tuned model was kept as final because it comes from a systematic, reproducible search rather than because it clearly outperforms the simple baseline — the pipeline reports this honestly rather than only showing the comparison that favors the more complex model.
 
 ## Requirements
 

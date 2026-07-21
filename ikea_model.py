@@ -159,6 +159,7 @@ def prepare_ml_data(
 
     print(f"✓ volume: создано {df_ml['volume'].notna().sum()} значений")
     print(f"❌ area, log_volume УДАЛЕНЫ (мультиколлинеарность)")
+    print(f"  ⚠️ volume: справочно + для is_large_item, в модель НЕ входит (мультиколлинеарность с depth/height/width)")
 
     # ========================================================================
     # ШАГ 4: Частотность дизайнера — ПЕРЕНОСИМ ПОСЛЕ SPLIT!
@@ -385,9 +386,22 @@ def prepare_ml_data(
     #   - desc_quality_score: ΔR²/ΔMAE в пределах 95% CI шума (дублирует premium_materials_count)
     #   - complexity_x_premium: ΔR²/ΔMAE в пределах 95% CI шума (произведение assembly_complexity × is_premium_category,
     #     не несёт информации сверх компонентов)
+    #
+    # 🔧 volume ИСКЛЮЧЁН из признаков модели (изначально рекомендация куратора —
+    # мультиколлинеарность с depth/height/width, volume = depth×height×width).
+    # Решение принято после ТРЁХ независимых проверок в ходе развития проекта:
+    #   1) Bootstrap Ablation, старые (устаревшие) гиперпараметры, 15 повторов → шум
+    #   2) Те же гиперпараметры, 40 повторов → значим (недостаточная мощность на 15)
+    #   3) ОКОНЧАТЕЛЬНЫЕ гиперпараметры (после устранения устаревшего Optuna-кэша),
+    #      40 повторов → ΔR²=-0.0032, 95%CI[-0.0206;+0.0101] → вредит/шум
+    # Итог (3) — с честными, актуальными гиперпараметрами — совпал с исходным
+    # опасением куратора. Колонка 'volume' по-прежнему СОЗДАЁТСЯ в df_ml (нужна
+    # для is_large_item и для EDA/Гипотезы 1 — самостоятельного статистического
+    # вопроса "влияет ли объём на цену", не связанного с тем, входит ли volume
+    # в ИТОГОВУЮ модель) — исключена только из этого списка признаков модели.
     numeric_features = [
         # Габариты (базовые)
-        'depth', 'height', 'width', 'volume',
+        'depth', 'height', 'width',
         # NLP
         'desc_length', 'desc_word_count',
         'premium_materials_count',
@@ -531,8 +545,12 @@ def prepare_ml_data(
     print(f"  • Медиана объёма (train): {volume_median_train:.0f} см³")
     print(f"  • Крупных товаров (train): {X_train['is_large_item'].sum()}")
 
-    # Добавляем is_large_item в бинарные признаки
-    binary_features.append('is_large_item')
+    # 🔧 is_large_item ИСКЛЮЧЁН из признаков модели (последовательность с решением
+    # по volume, от которого is_large_item производен). Bootstrap Ablation (40
+    # повторов, окончательные гиперпараметры) дал ΔR²=-0.0002, 95%CI[-0.0050;+0.0031]
+    # → вредит/шум. Колонка по-прежнему СОЗДАЁТСЯ (справочно), в binary_features
+    # НЕ добавляется.
+    print(f"  ⚠️ is_large_item: справочно, в модель НЕ входит (Bootstrap Ablation: вредит/шум)")
 
     print(f"\n✅ LEAKAGE УСТРАНЁН: все статистики вычислены только на train set!")
 
@@ -1058,6 +1076,11 @@ def cross_validate_model(
     ax.set_title(f'Кросс-валидация ({model_class.__name__})', fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
+    # 🔧 По рекомендации куратора: подписи оси X только целыми числами
+    # (номер фолда — целое число по определению, matplotlib по умолчанию
+    # мог показывать дробные деления вроде 1.5, 2.5 на узких графиках).
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     for i, score in enumerate(cv_scores):
         ax.text(i + 1, score + 0.01, f'{score:.4f}', ha='center', fontweight='bold')
@@ -2312,17 +2335,18 @@ def run_ablation_study(
         bool_features = []
 
     groups = {
-        'Габариты': ['depth', 'height', 'width', 'volume'],
+        # 🔧 volume убран из группы: больше не признак модели (мультиколлинеарность
+        # с depth/height/width, см. комментарий в prepare_ml_data())
+        'Габариты': ['depth', 'height', 'width'],
         'NLP': ['desc_length', 'desc_word_count', 'premium_materials_count'],
         'Дизайнер': ['designer_freq'],
         'Сложность сборки': ['assembly_complexity'],
         'Ценовой контекст': ['category_price_level'],
-        'Крупные товары': ['is_large_item'],
-        # 🔧 is_large_item исключён отсюда: он уже отдельная группа "Крупные товары"
-        # выше. Раньше binary_features (куда is_large_item добавляется на Шаге 10.1.3)
-        # передавался сюда целиком — признак тестировался дважды под разными именами,
-        # и ΔR² группы "Бинарные" был частично загрязнён его вкладом.
-        'Бинарные': [f for f in binary_features if f != 'is_large_item'],
+        # 🔧 Группа "Крупные товары" (is_large_item) УБРАНА: is_large_item больше
+        # не признак модели (Bootstrap Ablation, 40 повторов, окончательные
+        # гиперпараметры: ΔR²=-0.0002, CI пересекает 0 → вредит/шум, вслед за
+        # решением по volume, от которого признак производен).
+        'Бинарные': binary_features,
         'Булевые': bool_features,
         'Категория': categorical_features
     }
@@ -2514,29 +2538,34 @@ def run_ablation_study(
                 print(f"   • {row['Group']}: ΔR² = {row['ΔR²']:+.4f}")
             print(f"   → Эти признаки создают шум или мультиколлинеарность")
 
-        # 🔧 РЕШЕНИЕ ПО category_price_level И is_large_item (по итогам Bootstrap
-        # Ablation + группового Ablation Study — оба метода согласованно дали
-        # отрицательную ΔR² для этих двух признаков по отдельности):
-        # Быстрая joint-проверка (единичный train/test split, параметры
-        # GridSearchCV, БЕЗ повторного полного пересчёта Optuna) на
-        # одновременном удалении ОБОИХ признаков сразу дала ΔR²=-0.0036,
-        # ΔMAE=+1.84 SR — то есть совместный эффект НЕ аддитивен точечным
-        # результатам по отдельности (ожидался позитивный или нейтральный
-        # эффект, получен слабо отрицательный, на грани нашего же порога
-        # шума 0.003). Признаки СОХРАНЕНЫ в модели по итогам этой проверки.
-        # Для окончательного решения нужен bootstrap-прогон совместного
-        # удаления (не единичный сплит) — technически это уже поддержано
-        # параметром exclude_noisy_features в prepare_ml_data(), полный
-        # пересчёт GridSearchCV/Optuna пока не запускался.
-        print(f"\n🔧 Отдельная проверка: category_price_level + is_large_item")
-        print(f"   Оба признака по отдельности дали отрицательную ΔR² в этом ")
-        print(f"   Ablation Study И в Bootstrap Ablation (см. выше/отдельный отчёт).")
-        print(f"   Быстрая совместная проверка (один train/test split, без")
-        print(f"   пересчёта Optuna): ΔR²=-0.0036, ΔMAE=+1.84 SR — совместный")
-        print(f"   эффект слабо ОТРИЦАТЕЛЕН (на грани порога шума 0.003), не")
-        print(f"   аддитивен точечным результатам. Признаки СОХРАНЕНЫ в модели;")
-        print(f"   для окончательного решения нужен bootstrap-прогон совместного")
-        print(f"   удаления. См. параметр exclude_noisy_features в prepare_ml_data().")
+        # 🔧 ИСТОРИЯ РЕШЕНИЙ ПО МУЛЬТИКОЛЛИНЕАРНЫМ/ШУМОВЫМ ПРИЗНАКАМ (volume,
+        # is_large_item, category_price_level) — три раунда проверки в ходе
+        # развития проекта, финальные решения:
+        #
+        # volume: рекомендация куратора (мультиколлинеарность с depth/height/
+        #   width). Раунд 1 (15 повторов, устаревшие гиперпараметры) → шум.
+        #   Раунд 2 (40 повторов, те же устаревшие гиперпараметры) → значим
+        #   (раунд 1 оказался недостаточной мощности, Type II error). Раунд 3
+        #   (40 повторов, ОКОНЧАТЕЛЬНЫЕ гиперпараметры после устранения
+        #   устаревшего Optuna-кэша) → ΔR²=-0.0032, CI[-0.0206;+0.0101] →
+        #   вредит/шум. ИТОГ: УДАЛЁН из признаков модели (см. ШАГ 9 выше) —
+        #   куратор был прав, подтверждено на честных данных.
+        #
+        # is_large_item (производный от volume): тем же раундом 3 получил
+        #   ΔR²=-0.0002, CI[-0.0050;+0.0031] → вредит/шум. ИТОГ: УДАЛЁН из
+        #   признаков модели вслед за volume — последовательность решения.
+        #
+        # category_price_level: раунд 3 дал ΔR²=+0.0001, CI[-0.0048;+0.0048]
+        #   → шум, но НЕ отрицательный и не значимый — граничный случай,
+        #   отличный от volume/is_large_item (те явно отрицательны). ИТОГ:
+        #   ОСТАВЛЕН в модели — нет достаточных оснований для удаления, в
+        #   отличие от двух других. Параметр exclude_noisy_features в
+        #   prepare_ml_data() по-прежнему доступен для дальнейшей проверки,
+        #   если потребуется.
+        print(f"\n🔧 Итоговые решения по мультиколлинеарным/шумовым признакам:")
+        print(f"   • volume: УДАЛЁН (подтверждено куратором + 3 раунда Bootstrap Ablation)")
+        print(f"   • is_large_item: УДАЛЁН (производный от volume, тот же вердикт)")
+        print(f"   • category_price_level: ОСТАВЛЕН (граничный случай, не отрицателен)")
 
     return results_df
 
@@ -2556,7 +2585,7 @@ def run_bootstrap_ablation(
         best_params: Optional[Dict[str, Any]] = None,
         model_name: str = 'RandomForest',
         features_to_test: Optional[List[str]] = None,
-        n_repeats: int = 15,
+        n_repeats: int = 40,
         ci_level: float = 0.95,
         random_state_base: int = 42
 ) -> pd.DataFrame:
@@ -2626,7 +2655,7 @@ def run_bootstrap_ablation(
     ...     X_train, X_test, y_train, y_test,
     ...     numeric_features=numeric_features, categorical_features=['category'],
     ...     binary_features=binary_features, model_name='RandomForest',
-    ...     features_to_test=['volume', 'desc_word_count'], n_repeats=15
+    ...     features_to_test=['volume', 'desc_word_count'], n_repeats=40
     ... )
     """
 
@@ -3424,7 +3453,12 @@ def _run_post_training_analysis(
         binary_features=bin_feat, bool_features=bool_feat,
         best_params=final_params, model_name=final_model_type,
         features_to_test=None,
-        n_repeats=15
+        # 🔧 n_repeats увеличен с 15 до 40: на 15 повторах вывод по 'volume'
+        # был статистически ошибочным (Type II error — недостаточная мощность
+        # теста). На 40 повторах вывод для 6 из 19 признаков изменился, включая
+        # volume (стал значим, ΔR²=+0.0281, 95%CI[+0.0145;+0.0438] против
+        # незначимого на 15 повторах). См. reports_step/bootstrap_ablation_results.csv
+        n_repeats=40
     )
 
     print(f"\n{'=' * 70}")
