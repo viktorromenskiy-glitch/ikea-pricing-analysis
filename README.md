@@ -4,8 +4,6 @@
 
 An end-to-end data science project on the [TidyTuesday IKEA dataset](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-11-03) (3,694 rows, 2,962 unique SKUs, Saudi Arabia market). The project covers statistical hypothesis testing, feature engineering with explicit leakage prevention, hyperparameter optimization, and multiple layers of model interpretation — built as a from-scratch analytics exercise, then refactored into production-style modules.
 
-**🔗 [Try the live demo](https://ml-ikea-app-c69harkxgk4nroywbv9iz6.streamlit.app/)** — an interactive Streamlit app that predicts a price from product attributes, deriving most engineered features automatically from a description and designer name ([demo source](https://github.com/viktorromenskiy-glitch/ml-ikea-app)).
-
 ## Results at a glance
 
 | Metric | Value |
@@ -32,13 +30,13 @@ An end-to-end data science project on the [TidyTuesday IKEA dataset](https://git
 The pipeline was originally a single ~9,900-line script; it has since been refactored into 7 focused modules (~10,000 lines total), each independently importable and testable:
 
 ```
-ikea_main.py           # entry point — orchestrates the full pipeline, final report
-ikea_core.py           # config, MLPipelineResult dataclass, logging, Optuna cache (fingerprinted)
-ikea_data_prep.py      # data loading, deduplication, designer/dimension cleaning
-ikea_eda.py            # exploratory analysis, sellable_online / old_price leakage checks
-ikea_hypotheses.py     # 9 statistical hypotheses (bootstrap, Mann-Whitney, Kruskal-Wallis)
-ikea_model.py          # feature engineering, Optuna, GridSearchCV, Ablation Study
-ikea_interpret.py      # SHAP, feature importance, residuals, baseline comparison, revenue impact
+ikea_main.py # entry point — orchestrates the full pipeline, final report
+ikea_core.py # config, MLPipelineResult dataclass, logging, Optuna cache (fingerprinted)
+ikea_data_prep.py # data loading, deduplication, designer/dimension cleaning
+ikea_eda.py # exploratory analysis, sellable_online / old_price leakage checks
+ikea_hypotheses.py # 9 statistical hypotheses (bootstrap, Mann-Whitney, Kruskal-Wallis)
+ikea_model.py # feature engineering, Optuna, GridSearchCV, Ablation Study
+ikea_interpret.py # SHAP, feature importance, residuals, baseline comparison, revenue impact
 ```
 
 `run_ml_pipeline()` in `ikea_model.py` is itself decomposed into 4 private helper functions (`_prepare_and_compare_baseline`, `_run_hyperparameter_search`, `_select_best_model`, `_run_post_training_analysis`) rather than one 300+ line function — a pure refactor, verified against the original monolith with identical output down to the 4th decimal.
@@ -52,8 +50,8 @@ python ikea_main.py
 
 Optional flags:
 ```bash
-python ikea_main.py --rerun-optuna       # force-recompute hyperparameter search, ignore cache
-python ikea_main.py --trials 20 --cv 3   # override trial/fold counts for a faster local run
+python ikea_main.py --rerun-optuna # force-recompute hyperparameter search, ignore cache
+python ikea_main.py --trials 20 --cv 3 # override trial/fold counts for a faster local run
 ```
 
 The dataset is downloaded automatically from the TidyTuesday GitHub repository on first run — no manual download needed. Outputs (plots, CSV reports, the trained model, and a full run log) are written to `plots_step/`, `reports_step/`, `models/`, and `logs/` respectively.
