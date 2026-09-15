@@ -1,6 +1,6 @@
 # IKEA Saudi Arabia — Price Prediction & Pricing Analysis
 
-*[Русская версия README доступна здесь](README_ru.md)*
+*[Русская версия README доступна здесь](README_ru.md) · [Українська версія тут](README_uk.md)*
 
 An end-to-end data science project on the [TidyTuesday IKEA dataset](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-11-03) (3,694 rows, 2,962 unique SKUs, Saudi Arabia market). The project covers statistical hypothesis testing, feature engineering with explicit leakage prevention, hyperparameter optimization, and multiple layers of model interpretation — built as a from-scratch analytics exercise, then refactored into production-style modules.
 
