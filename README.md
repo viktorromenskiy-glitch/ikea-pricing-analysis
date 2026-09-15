@@ -4,6 +4,8 @@
 
 An end-to-end data science project on the [TidyTuesday IKEA dataset](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-11-03) (3,694 rows, 2,962 unique SKUs, Saudi Arabia market). The project covers statistical hypothesis testing, feature engineering with explicit leakage prevention, hyperparameter optimization, and multiple layers of model interpretation — built as a from-scratch analytics exercise, then refactored into production-style modules.
 
+**In short:** pricing decisions on a large SKU catalog are often made by intuition or a flat category-median rule, with no way to know how much money that costs. This project builds and rigorously validates a price-prediction model on IKEA's Saudi Arabia catalog: Random Forest tuned with Optuna, reaching R²=0.8296 and a 65.3% MAE improvement over a naive baseline, with an estimated +34.4% revenue impact versus category-median pricing. Stack: pandas, scikit-learn, XGBoost, Optuna, SHAP. For a retailer or catalog business with pricing data and a hunch that better pricing is on the table, this is the kind of validated pricing/revenue-optimization model I build — one where every feature and every limitation is checked and reported honestly, not just the number that looks best.
+
 ## Results at a glance
 
 | Metric | Value |
