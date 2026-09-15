@@ -76,6 +76,6 @@ python ikea_main.py --trials 20 --cv 3 # уменьшить число итер�
 
 См. `requirements.txt`. Основные библиотеки: `pandas`, `numpy`, `scikit-learn`, `xgboost`, `optuna`, `shap`, `matplotlib`, `seaborn`, `scipy`, `tabulate`.
 
-## Автор
+## Об авторе
 
-Виктор Роменский
+Виктор Роменский — GenAI/ML-инженер (RAG-системы, оценка LLM, fine-tuning). GitHub: [viktorromenskiy-glitch](https://github.com/viktorromenskiy-glitch) · LinkedIn: [профиль](https://www.linkedin.com/in/%D0%B2%D0%B8%D0%BA%D1%82%D0%BE%D1%80-%D1%80%D0%BE%D0%BC%D0%B5%D0%BD%D1%81%D0%BA%D0%B8%D0%B9-029b2086/) · Hugging Face: [ViktorPetrov123](https://huggingface.co/ViktorPetrov123) · Контакт: viktorromenskiy@gmail.com
