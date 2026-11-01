@@ -16,9 +16,9 @@ An end-to-end data science project on the [TidyTuesday IKEA dataset](https://git
 | Test MAE | 312.00 SR |
 | vs. naive baseline (median price) | +65.3% MAE improvement |
 | vs. untuned Random Forest | untuned RF actually scored **0.0076 higher on R²** (0.8372 vs 0.8296) — the gap is within CV noise, and is reported honestly rather than smoothed over (see notes below) |
-| Estimated revenue impact vs. category-median pricing | +34.4% |
+| Simulated revenue impact vs. category-median pricing (test set, 593 items) | +34.4% in total; the model prices 46.5% of items higher than the baseline and 53.5% lower (median difference −36.8 SR), so this is a simulation, not a measured result |
 
-**Top price drivers** (SHAP + built-in feature importance, in agreement): product **width** (~42%), **height** (~11%), **depth** (~10%), description length, and category price level.
+**Top price drivers** (built-in Random Forest importance): product **width** (41.7%), **height** (10.7%), **depth** (9.6%), description length (8.9%), and category price level (7.4%). SHAP agrees that width is the top feature, but with a smaller share (34.0%).
 
 ## What makes this project different from a typical "train a model, report R²" notebook
 
@@ -36,7 +36,7 @@ ikea_main.py # entry point — orchestrates the full pipeline, final report
 ikea_core.py # config, MLPipelineResult dataclass, logging, Optuna cache (fingerprinted)
 ikea_data_prep.py # data loading, deduplication, designer/dimension cleaning
 ikea_eda.py # exploratory analysis, sellable_online / old_price leakage checks
-ikea_hypotheses.py # 9 statistical hypotheses (bootstrap, Mann-Whitney, Kruskal-Wallis)
+ikea_hypotheses.py # 6 main statistical hypotheses plus 4 flat-pack checks (bootstrap, Mann-Whitney, Kruskal-Wallis)
 ikea_model.py # feature engineering, Optuna, GridSearchCV, Ablation Study
 ikea_interpret.py # SHAP, feature importance, residuals, baseline comparison, revenue impact
 ```
@@ -61,7 +61,7 @@ The dataset is downloaded automatically from the TidyTuesday GitHub repository o
 ## Methodology overview
 
 1. **Data preparation** — deduplication (3,694 → 2,962 unique SKUs), missing-dimension imputation, designer name normalization.
-2. **Statistical hypothesis testing** — 9 hypotheses (e.g. "larger volume → higher price", "team-designed products cost more", "premium materials command a price premium") tested with Mann-Whitney U, Kruskal-Wallis, and bootstrap confidence intervals on the median difference. (Note: `volume` is a valid, independent EDA/hypothesis-testing question here — it's a different question from whether `volume` should be a *model* feature; see below.)
+2. **Statistical hypothesis testing** — 6 main hypotheses plus 4 flat-pack checks (e.g. "larger volume → higher price", "team-designed products cost more", "premium materials command a price premium") tested with Mann-Whitney U, Kruskal-Wallis, and bootstrap confidence intervals on the median difference. (Note: `volume` is a valid, independent EDA/hypothesis-testing question here — it's a different question from whether `volume` should be a *model* feature; see below.)
 3. **Feature engineering with leakage prevention** — dimension-based, NLP-derived (description length/word count/premium-material mentions), and category-context features; any feature derived from a train/test-dependent statistic is computed strictly post-split.
 4. **Model selection** — 8 baseline models compared, then Optuna (4 experiments, Bayesian TPE search) and GridSearchCV compete against each other and against the simple baseline.
 5. **Interpretation** — SHAP values, built-in feature importance, Partial Dependence Plots, residual analysis (including a heteroscedasticity check), and a bootstrap confidence interval on the final MAE.
